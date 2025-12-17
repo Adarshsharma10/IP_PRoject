@@ -46,7 +46,16 @@ py -m venv .venv
 - Copy `.env.example` to `.env`
 - Set `CARPAS_DATABASE_URL` if you want MySQL/PostgreSQL
 
-4) Run the app:
+4) (Optional) Seed synthetic/demo data (for screenshots/viva):
+```powershell
+.\.venv\Scripts\python -m carpas.seed
+```
+To delete existing data and reseed (dangerous):
+```powershell
+.\.venv\Scripts\python -m carpas.seed --reset
+```
+
+5) Run the app:
 ```powershell
 .\.venv\Scripts\python main.py
 ```

@@ -290,7 +290,8 @@ def get_student_enrollment_summaries(session: Session, *, student_id: int) -> li
         )
         .order_by(Enrollment.id)
     )
-    enrollments = session.execute(stmt).scalars().all()
+    # joinedload(Enrollment.marks) is a collection eager load; unique() de-duplicates parent rows.
+    enrollments = session.execute(stmt).unique().scalars().all()
 
     summaries: list[EnrollmentSummary] = []
     for e in enrollments:
@@ -368,7 +369,7 @@ def find_at_risk(
             joinedload(Enrollment.attendance),
             joinedload(Enrollment.marks),
         )
-    ).scalars().all()
+    ).unique().scalars().all()
 
     results: list[dict[str, object]] = []
     for e in enrollments:
