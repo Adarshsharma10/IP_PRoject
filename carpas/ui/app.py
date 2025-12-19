@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import messagebox, ttk
+
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
 
 from ..config import APP_TITLE
 from ..db import session_scope
+from ..models import Course, Enrollment, Student
 from ..services import (
     ServiceError,
     add_mark,
@@ -58,6 +63,8 @@ class CarpasApp(tk.Tk):
         self.geometry("1100x650")
         self.minsize(1000, 600)
 
+        self._setup_style()
+
         notebook = ttk.Notebook(self)
         notebook.pack(fill="both", expand=True)
 
@@ -77,6 +84,23 @@ class CarpasApp(tk.Tk):
 
         self.refresh_all()
 
+    def _setup_style(self) -> None:
+        """Small, viva-friendly styling so the UI looks clean and consistent."""
+        style = ttk.Style(self)
+
+        current_theme = style.theme_use()
+        for theme in ("vista", "clam", current_theme):
+            try:
+                style.theme_use(theme)
+                break
+            except tk.TclError:
+                continue
+
+        base_font = ("Segoe UI", 10)
+        style.configure(".", font=base_font)
+        style.configure("Treeview", rowheight=24)
+        style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
+
     def refresh_all(self) -> None:
         self.students_tab.refresh()
         self.courses_tab.refresh()
@@ -91,6 +115,8 @@ class CarpasApp(tk.Tk):
         self.attendance_tab.refresh_choices()
         self.marks_tab.refresh_choices()
         self.analysis_tab.refresh_choices()
+        # Keep the at-risk list fresh after any data mutation (do not block on invalid thresholds).
+        self.analysis_tab.refresh_at_risk(show_error=False)
 
 
 class StudentsTab(ttk.Frame):
@@ -188,8 +214,9 @@ class StudentsTab(ttk.Frame):
         student_id = int(selection[0])
         self.selected_student_id = student_id
 
+        # Fetch the latest row from the DB (avoid list-based lookup that can go stale).
         with session_scope() as session:
-            student = next((s for s in list_students(session) if s.id == student_id), None)
+            student = session.get(Student, student_id)
             if not student:
                 return
 
@@ -374,8 +401,9 @@ class CoursesTab(ttk.Frame):
         course_id = int(selection[0])
         self.selected_course_id = course_id
 
+        # Fetch the latest row from the DB (avoid list-based lookup that can go stale).
         with session_scope() as session:
-            course = next((c for c in list_courses(session) if c.id == course_id), None)
+            course = session.get(Course, course_id)
             if not course:
                 return
 
@@ -680,8 +708,9 @@ class AttendanceTab(ttk.Frame):
             messagebox.showerror("Error", "Select an enrollment.")
             return
 
+        # Fetch the latest enrollment row from the DB.
         with session_scope() as session:
-            e = next((x for x in list_enrollments(session) if x.id == enrollment_id), None)
+            e = session.get(Enrollment, enrollment_id)
             if not e:
                 messagebox.showerror("Error", "Enrollment not found.")
                 return
@@ -711,7 +740,7 @@ class AttendanceTab(ttk.Frame):
                 )
 
             self.refresh()
-            self.app.analysis_tab.refresh_at_risk()
+            self.app.analysis_tab.refresh_at_risk(show_error=False)
             messagebox.showinfo("Success", "Attendance saved.")
         except (ServiceError, ValueError) as e:
             messagebox.showerror("Error", str(e))
@@ -828,7 +857,7 @@ class MarksTab(ttk.Frame):
                 )
 
             self.refresh_marks_only()
-            self.app.analysis_tab.refresh_at_risk()
+            self.app.analysis_tab.refresh_at_risk(show_error=False)
             messagebox.showinfo("Success", "Mark added.")
         except (ServiceError, ValueError) as e:
             messagebox.showerror("Error", str(e))
@@ -848,7 +877,7 @@ class MarksTab(ttk.Frame):
                 delete_mark(session, mark_id=mark_id)
 
             self.refresh_marks_only()
-            self.app.analysis_tab.refresh_at_risk()
+            self.app.analysis_tab.refresh_at_risk(show_error=False)
             messagebox.showinfo("Success", "Mark deleted.")
         except ServiceError as e:
             messagebox.showerror("Error", str(e))
@@ -862,6 +891,10 @@ class AnalysisTab(ttk.Frame):
         self.student_var = tk.StringVar()
         self.course_var = tk.StringVar()
 
+        # At-risk thresholds (editable in UI; defaults are common college rules)
+        self.att_threshold_var = tk.StringVar(value="75")
+        self.marks_threshold_var = tk.StringVar(value="40")
+
         top = ttk.Frame(self)
         top.pack(fill="x", padx=10, pady=10)
         top.columnconfigure(1, weight=1)
@@ -870,25 +903,43 @@ class AnalysisTab(ttk.Frame):
         ttk.Label(top, text="Student").grid(row=0, column=0, sticky="w", padx=6, pady=6)
         self.student_cb = ttk.Combobox(top, textvariable=self.student_var, state="readonly")
         self.student_cb.grid(row=0, column=1, sticky="ew", padx=6, pady=6)
+        self.student_cb.bind("<<ComboboxSelected>>", lambda _e: self.update_student_report())
 
         ttk.Label(top, text="Course").grid(row=0, column=2, sticky="w", padx=6, pady=6)
         self.course_cb = ttk.Combobox(top, textvariable=self.course_var, state="readonly")
         self.course_cb.grid(row=0, column=3, sticky="ew", padx=6, pady=6)
 
+        ttk.Label(top, text="At-Risk Attendance < (%)").grid(row=1, column=0, sticky="w", padx=6, pady=6)
+        ttk.Entry(top, textvariable=self.att_threshold_var, width=10).grid(
+            row=1, column=1, sticky="ew", padx=6, pady=6
+        )
+
+        ttk.Label(top, text="At-Risk Marks < (%)").grid(row=1, column=2, sticky="w", padx=6, pady=6)
+        ttk.Entry(top, textvariable=self.marks_threshold_var, width=10).grid(
+            row=1, column=3, sticky="ew", padx=6, pady=6
+        )
+
         btns = ttk.Frame(top)
-        btns.grid(row=1, column=0, columnspan=4, sticky="w", padx=6, pady=6)
+        btns.grid(row=2, column=0, columnspan=4, sticky="w", padx=6, pady=6)
         ttk.Button(btns, text="Student Report", command=self.show_student_report).pack(side="left", padx=4)
         ttk.Button(btns, text="Course Averages", command=self.show_course_averages).pack(side="left", padx=4)
         ttk.Button(btns, text="Refresh At-Risk", command=self.refresh_at_risk).pack(side="left", padx=4)
 
+        # Upper area: report table (left) + graphs (right)
+        upper = ttk.Frame(self)
+        upper.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        upper.columnconfigure(0, weight=1)
+        upper.columnconfigure(1, weight=1)
+        upper.rowconfigure(0, weight=1)
+
         # Student report table
-        report_frame = ttk.LabelFrame(self, text="Student Course Summary")
-        report_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        report_frame = ttk.LabelFrame(upper, text="Student Course Summary")
+        report_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         report_frame.rowconfigure(0, weight=1)
         report_frame.columnconfigure(0, weight=1)
 
         rep_cols = ("course", "attendance", "marks")
-        self.report_tree = ttk.Treeview(report_frame, columns=rep_cols, show="headings", height=8)
+        self.report_tree = ttk.Treeview(report_frame, columns=rep_cols, show="headings", height=10)
         self.report_tree.heading("course", text="Course")
         self.report_tree.heading("attendance", text="Attendance %")
         self.report_tree.heading("marks", text="Marks %")
@@ -900,6 +951,21 @@ class AnalysisTab(ttk.Frame):
         rep_scroll = ttk.Scrollbar(report_frame, orient="vertical", command=self.report_tree.yview)
         self.report_tree.configure(yscrollcommand=rep_scroll.set)
         rep_scroll.grid(row=0, column=1, sticky="ns")
+
+        # Graphs (matplotlib embedded in Tkinter)
+        graphs_frame = ttk.LabelFrame(upper, text="Student Graphs")
+        graphs_frame.grid(row=0, column=1, sticky="nsew")
+        graphs_frame.rowconfigure(0, weight=1)
+        graphs_frame.columnconfigure(0, weight=1)
+
+        self.fig = Figure(figsize=(5, 4), dpi=100)
+        self.ax_att = self.fig.add_subplot(211)
+        self.ax_marks = self.fig.add_subplot(212)
+        self.fig.tight_layout(pad=2.0)
+
+        self.canvas = FigureCanvasTkAgg(self.fig, master=graphs_frame)
+        self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        self._clear_charts()
 
         # At-risk table
         risk_frame = ttk.LabelFrame(self, text="At-Risk Students")
@@ -931,24 +997,129 @@ class AnalysisTab(ttk.Frame):
             students = list_students(session)
             courses = list_courses(session)
 
-        self.student_cb["values"] = [f"{s.id}: {s.roll_no} - {s.name}" for s in students]
-        self.course_cb["values"] = [f"{c.id}: {c.code} - {c.name}" for c in courses]
+        student_values = [f"{s.id}: {s.roll_no} - {s.name}" for s in students]
+        course_values = [f"{c.id}: {c.code} - {c.name}" for c in courses]
+
+        self.student_cb["values"] = student_values
+        self.course_cb["values"] = course_values
+
+        # Keep current selection if possible; otherwise select the first item.
+        if self.student_var.get() not in student_values:
+            self.student_var.set(student_values[0] if student_values else "")
+        if self.course_var.get() not in course_values:
+            self.course_var.set(course_values[0] if course_values else "")
 
     def refresh(self) -> None:
         self.refresh_choices()
         self.refresh_at_risk()
+        self.update_student_report(show_error=False)
 
-    def show_student_report(self) -> None:
-        student_id = _parse_choice_id(self.student_var.get())
-        if not student_id:
-            messagebox.showerror("Error", "Select a student.")
-            return
+    def _thresholds_or_error(self) -> tuple[float, float] | None:
+        """Read thresholds from UI entries; return None and show error if invalid."""
+        try:
+            att = float(self.att_threshold_var.get().strip())
+            marks = float(self.marks_threshold_var.get().strip())
+        except ValueError:
+            messagebox.showerror("Error", "Enter numeric thresholds (example: 75 and 40).")
+            return None
 
+        if not (0.0 <= att <= 100.0) or not (0.0 <= marks <= 100.0):
+            messagebox.showerror("Error", "Thresholds must be between 0 and 100.")
+            return None
+
+        return att, marks
+
+    def _thresholds_for_charts(self) -> tuple[float, float]:
+        """Thresholds for plotting (falls back to defaults if user input is invalid)."""
+        try:
+            att = float(self.att_threshold_var.get().strip())
+        except ValueError:
+            att = 75.0
+
+        try:
+            marks = float(self.marks_threshold_var.get().strip())
+        except ValueError:
+            marks = 40.0
+
+        return att, marks
+
+    def _clear_report(self) -> None:
         for item in self.report_tree.get_children():
             self.report_tree.delete(item)
 
+    def _clear_charts(self) -> None:
+        self.ax_att.clear()
+        self.ax_marks.clear()
+
+        self.ax_att.set_title("Attendance % per Course")
+        self.ax_att.set_ylim(0, 100)
+        self.ax_att.set_ylabel("%")
+        self.ax_att.grid(axis="y", linestyle=":", alpha=0.35)
+        self.ax_att.text(
+            0.5,
+            0.5,
+            "Select a student to view graphs",
+            transform=self.ax_att.transAxes,
+            ha="center",
+            va="center",
+            fontsize=10,
+        )
+
+        self.ax_marks.set_title("Marks % per Course")
+        self.ax_marks.set_ylim(0, 100)
+        self.ax_marks.set_ylabel("%")
+        self.ax_marks.set_xlabel("Course")
+        self.ax_marks.grid(axis="y", linestyle=":", alpha=0.35)
+
+        self.fig.tight_layout(pad=2.0)
+        self.canvas.draw_idle()
+
+    def _update_charts(self, summaries) -> None:  # noqa: ANN001
+        course_codes = [s.course_code for s in summaries]
+        att_values = [0.0 if s.attendance_pct is None else float(s.attendance_pct) for s in summaries]
+        marks_values = [0.0 if s.marks_pct is None else float(s.marks_pct) for s in summaries]
+        att_th, marks_th = self._thresholds_for_charts()
+
+        self.ax_att.clear()
+        self.ax_att.bar(course_codes, att_values, color="#4C78A8")
+        self.ax_att.set_title("Attendance % per Course")
+        self.ax_att.set_ylim(0, 100)
+        self.ax_att.set_ylabel("%")
+        self.ax_att.grid(axis="y", linestyle=":", alpha=0.35)
+        self.ax_att.axhline(att_th, color="red", linestyle="--", linewidth=1)
+        self.ax_att.tick_params(axis="x", rotation=30)
+
+        self.ax_marks.clear()
+        self.ax_marks.bar(course_codes, marks_values, color="#54A24B")
+        self.ax_marks.set_title("Marks % per Course")
+        self.ax_marks.set_ylim(0, 100)
+        self.ax_marks.set_ylabel("%")
+        self.ax_marks.set_xlabel("Course")
+        self.ax_marks.grid(axis="y", linestyle=":", alpha=0.35)
+        self.ax_marks.axhline(marks_th, color="red", linestyle="--", linewidth=1)
+        self.ax_marks.tick_params(axis="x", rotation=30)
+
+        self.fig.tight_layout(pad=2.0)
+        self.canvas.draw_idle()
+
+    def update_student_report(self, *, show_error: bool = False) -> None:
+        """Update report table + graphs for the currently selected student."""
+        student_id = _parse_choice_id(self.student_var.get())
+        if not student_id:
+            if show_error:
+                messagebox.showerror("Error", "Select a student.")
+            self._clear_report()
+            self._clear_charts()
+            return
+
+        self._clear_report()
+
         with session_scope() as session:
             summaries = get_student_enrollment_summaries(session, student_id=student_id)
+
+        if not summaries:
+            self._clear_charts()
+            return
 
         for s in summaries:
             attendance = "" if s.attendance_pct is None else s.attendance_pct
@@ -959,6 +1130,12 @@ class AnalysisTab(ttk.Frame):
                 iid=str(s.enrollment_id),
                 values=(f"{s.course_code} - {s.course_name}", attendance, marks),
             )
+
+        self._update_charts(summaries)
+
+    def show_student_report(self) -> None:
+        # Button keeps the UI viva-friendly, but selection also auto-updates.
+        self.update_student_report(show_error=True)
 
     def show_course_averages(self) -> None:
         course_id = _parse_choice_id(self.course_var.get())
@@ -976,12 +1153,27 @@ class AnalysisTab(ttk.Frame):
             f"Average Attendance %: {avg_att if avg_att is not None else 'N/A'}",
         )
 
-    def refresh_at_risk(self) -> None:
+    def refresh_at_risk(self, *, show_error: bool = True) -> None:
+        # Ensure button-driven refresh reflects the latest data in the DB.
+        self.refresh_choices()
+
+        if show_error:
+            thresholds = self._thresholds_or_error()
+            if thresholds is None:
+                return
+            att_th, marks_th = thresholds
+        else:
+            att_th, marks_th = self._thresholds_for_charts()
+
         for item in self.risk_tree.get_children():
             self.risk_tree.delete(item)
 
         with session_scope() as session:
-            rows = find_at_risk(session)
+            rows = find_at_risk(
+                session,
+                attendance_threshold=att_th,
+                marks_threshold=marks_th,
+            )
 
         for r in rows:
             self.risk_tree.insert(

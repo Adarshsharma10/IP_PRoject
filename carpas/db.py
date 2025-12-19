@@ -32,8 +32,22 @@ SessionLocal = sessionmaker(
 
 
 def init_db() -> None:
-    """Create tables if they don't exist."""
+    """Create tables if they don't exist.
+
+    Notes:
+    - `create_all()` does not apply migrations. If the DB was created before some constraints
+      existed, duplicates may already exist. We run a small cleanup step to merge/remove
+      duplicates for core entities (students/courses/enrollments).
+    """
     Base.metadata.create_all(engine)
+
+    # Best-effort cleanup of historical duplicates (especially common with old SQLite files).
+    # Safe to run on every startup; it only acts when duplicates are detected.
+    from .maintenance import cleanup_duplicates, ensure_sqlite_unique_indexes
+
+    with session_scope() as session:
+        cleanup_duplicates(session)
+        ensure_sqlite_unique_indexes(session)
 
 
 @contextmanager
